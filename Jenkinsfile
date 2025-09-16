@@ -49,22 +49,21 @@ pipeline {
                         sh """
                             gcloud container clusters get-credentials ${CLUSTER_NAME} --zone ${CLUSTER_ZONE} --project ${PROJECT_ID}
 
-                            # Create namespace if not exists
                             kubectl apply -f manifests/${env}/namespace.yaml
 
-                            # Delete previous green deployments (ignore not found)
+                            # DELETE existing green deployments to avoid immutable field error
                             kubectl delete deployment frontend-green -n ${env} --ignore-not-found
                             kubectl delete deployment backend-green -n ${env} --ignore-not-found
 
-                            # Apply green deployments
+                            # Deploy green
                             kubectl apply -f manifests/${env}/frontend-green.yaml
                             kubectl apply -f manifests/${env}/backend-green.yaml
 
-                            # Update images in deployments
+                            # Update images
                             kubectl set image deployment/frontend-green frontend=${DOCKER_REPO}/gke-3tier-frontend:${IMAGE_TAG} -n ${env}
                             kubectl set image deployment/backend-green backend=${DOCKER_REPO}/gke-3tier-backend:${IMAGE_TAG} -n ${env}
 
-                            # Apply services if not already applied
+                            # Apply services (if not already created)
                             kubectl apply -f manifests/${env}/svc-frontend.yaml
                             kubectl apply -f manifests/${env}/svc-backend.yaml
                         """
