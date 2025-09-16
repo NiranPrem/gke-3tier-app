@@ -9,12 +9,6 @@ pipeline {
         IMAGE_BACKEND  = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-backend:latest"
         NAMESPACE_DEV = "dev"
     }
-
-    parameters {
-        booleanParam(name: 'SWITCH', defaultValue: false, description: 'Do you want to switch traffic to the new deployments? (Yes/No)')
-        booleanParam(name: 'ROLLBACK', defaultValue: false, description: 'Do you want to rollback to the previous deployments? (Yes/No)')
-    }
-
     stages {
 
         stage('Authenticate GCP') {
@@ -44,15 +38,18 @@ pipeline {
         stage('Blue-Green Deploy to Dev') {
             steps {
                 script {
+                    // Get currently active deployments
                     ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
                     ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
+                    // Determine idle deployments
                     IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
                     IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
                     echo "Active Frontend: ${ACTIVE_FRONTEND}, Deploying to: ${IDLE_FRONTEND}"
                     echo "Active Backend: ${ACTIVE_BACKEND}, Deploying to: ${IDLE_BACKEND}"
 
+                    // Deploy to idle
                     sh """
                         gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
 
@@ -63,35 +60,25 @@ pipeline {
                         kubectl set image deployment/${IDLE_BACKEND} backend=$IMAGE_BACKEND -n $NAMESPACE_DEV
                     """
 
-                    echo "Idle deployments are ready for testing."
-                }
-            }
-        }
-
-        stage('Switch Traffic') {
-            when { expression { params.SWITCH } }
-            steps {
-                script {
+                    // Switch services to new deployments
                     sh """
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
                     """
-                    echo "✅ Traffic switched to new deployments."
                 }
             }
         }
 
-        stage('Rollback') {
-            when { expression { params.ROLLBACK } }
+        stage('Cleanup Old Deployment') {
             steps {
                 script {
                     sh """
-                        kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_FRONTEND}"}}}'
-                        kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_BACKEND}"}}}'
+                        kubectl delete deployment $ACTIVE_FRONTEND -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment $ACTIVE_BACKEND -n $NAMESPACE_DEV --ignore-not-found
                     """
-                    echo "🔄 Traffic rolled back to previous deployments."
                 }
             }
         }
-    }
+
+    } // stages
 }
