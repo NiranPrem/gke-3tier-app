@@ -1,20 +1,16 @@
 pipeline {
     agent any
-
     environment {
-        PROJECT_ID = 'useful-variety-470306-n5'
-        CLUSTER_NAME = 'my-gke-cluster'
-        ZONE = 'us-central1-a'
-        GCP_KEY = credentials('GCP_CREDS')  // your Jenkins credential ID
-        DOCKER_REPO = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo"
+        PROJECT_ID     = "useful-variety-470306-n5"
+        CLUSTER_NAME   = "my-gke-cluster"
+        ZONE           = "us-central1-a"
+        GCP_KEY        = credentials('GCP_CREDS')
+        IMAGE_FRONTEND = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-frontend:latest"
+        IMAGE_BACKEND  = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-backend:latest"
+        NAMESPACE_DEV  = "dev"
     }
 
     stages {
-        stage('Checkout SCM') {
-            steps {
-                checkout scm
-            }
-        }
 
         stage('Authenticate GCP') {
             steps {
@@ -30,106 +26,77 @@ pipeline {
 
         stage('Build & Push Docker Images') {
             steps {
-                script {
-                    sh """
-                        # Frontend
-                        docker build -t ${DOCKER_REPO}/gke-3tier-frontend:latest ./frontend
-                        docker push ${DOCKER_REPO}/gke-3tier-frontend:latest
+                sh """
+                    docker build -t $IMAGE_FRONTEND ./frontend
+                    docker push $IMAGE_FRONTEND
 
-                        # Backend
-                        docker build -t ${DOCKER_REPO}/gke-3tier-backend:latest ./backend
-                        docker push ${DOCKER_REPO}/gke-3tier-backend:latest
+                    docker build -t $IMAGE_BACKEND ./backend
+                    docker push $IMAGE_BACKEND
+                """
+            }
+        }
+
+        stage('Deploy to Idle (Green/Blue)') {
+            steps {
+                script {
+                    def ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
+                    def ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
+
+                    def IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
+                    def IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
+
+                    echo "Active Frontend: ${ACTIVE_FRONTEND}, deploying new version to: ${IDLE_FRONTEND}"
+                    echo "Active Backend: ${ACTIVE_BACKEND}, deploying new version to: ${IDLE_BACKEND}"
+
+                    sh """
+                        gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
+
+                        kubectl apply -f manifests/dev/${IDLE_FRONTEND}.yaml
+                        kubectl set image deployment/${IDLE_FRONTEND} frontend=$IMAGE_FRONTEND -n $NAMESPACE_DEV
+
+                        kubectl apply -f manifests/dev/${IDLE_BACKEND}.yaml
+                        kubectl set image deployment/${IDLE_BACKEND} backend=$IMAGE_BACKEND -n $NAMESPACE_DEV
                     """
                 }
             }
         }
 
-        stage('Deploy Green') {
+        stage('Approval Gate') {
             steps {
                 script {
-                    def environments = ['dev', 'staging', 'prod']
-
-                    for (envName in environments) {
-                        echo "Deploying green version to ${envName}..."
-
-                        sh """
-                            # Get GKE credentials
-                            gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
-
-                            # Create namespace if not exists
-                            kubectl apply -f manifests/${envName}/namespace.yaml
-
-                            # Delete old green deployments if any
-                            kubectl delete deployment frontend-green -n ${envName} --ignore-not-found
-                            kubectl delete deployment backend-green -n ${envName} --ignore-not-found
-
-                            # Apply new green deployments
-                            kubectl apply -f manifests/${envName}/frontend-green.yaml
-                            kubectl apply -f manifests/${envName}/backend-green.yaml
-
-                            # Apply services (needed for cutover)
-                            kubectl apply -f manifests/${envName}/svc-frontend.yaml
-                            kubectl apply -f manifests/${envName}/svc-backend.yaml
-
-                            # Update deployment images to latest
-                            kubectl set image deployment/frontend-green frontend=${DOCKER_REPO}/gke-3tier-frontend:latest -n ${envName}
-                            kubectl set image deployment/backend-green backend=${DOCKER_REPO}/gke-3tier-backend:latest -n ${envName}
-                        """
-                    }
+                    input message: "Do you want to switch traffic to the new (green/blue) deployments?", ok: "Switch"
                 }
             }
         }
 
-        stage('Cutover Blue → Green') {
+        stage('Switch Traffic') {
             steps {
                 script {
-                    def environments = ['dev', 'staging', 'prod']
+                    def ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
+                    def ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
-                    for (envName in environments) {
-                        echo "Cutting over ${envName} from blue → green..."
+                    def IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
+                    def IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
-                        sh """
-                            gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
-
-                            # Patch frontend service to green
-                            kubectl patch svc frontend -n ${envName} -p '{"spec":{"selector":{"app":"frontend-green"}}}' || echo "Service frontend not found"
-
-                            # Patch backend service to green
-                            kubectl patch svc backend -n ${envName} -p '{"spec":{"selector":{"app":"backend-green"}}}' || echo "Service backend not found"
-                        """
-                    }
+                    sh """
+                        kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
+                        kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
+                    """
                 }
             }
         }
 
-        stage('Cleanup Old Blue') {
+        stage('Cleanup Old Deployment') {
             steps {
                 script {
-                    def environments = ['dev', 'staging', 'prod']
-
-                    for (envName in environments) {
-                        echo "Cleaning up old blue deployments in ${envName}..."
-
-                        sh """
-                            gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
-                            kubectl delete deployment frontend-blue -n ${envName} --ignore-not-found
-                            kubectl delete deployment backend-blue -n ${envName} --ignore-not-found
-                        """
-                    }
+                    sh """
+                        kubectl delete deployment frontend-blue -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment frontend-green -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment backend-blue -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment backend-green -n $NAMESPACE_DEV --ignore-not-found
+                    """
                 }
             }
-        }
-    }
-
-    post {
-        success {
-            echo "✅ Pipeline finished successfully"
-        }
-        failure {
-            echo "❌ Deployment failed. Check logs."
-        }
-        always {
-            cleanWs()
         }
     }
 }
