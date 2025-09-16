@@ -2,22 +2,26 @@ pipeline {
     agent any
 
     environment {
-        PROJECT_ID = 'useful-variety-470306-n5'
-        CLUSTER_ZONE = 'us-central1-a'
-        CLUSTER_NAME = 'my-gke-cluster'
-        GCP_KEY = credentials('GCP_CREDS') // Jenkins GCP service account
+        PROJECT_ID = "useful-variety-470306-n5"
+        CLUSTER_NAME = "my-gke-cluster"
+        CLUSTER_ZONE = "us-central1-a"
+        DOCKER_REPO = "us-central1-docker.pkg.dev/useful-variety-470306-n5/gke-repo"
         IMAGE_TAG = "latest"
-        DOCKER_REPO = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo"
     }
 
     stages {
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Authenticate GCP') {
             steps {
-                withCredentials([file(credentialsId: 'GCP_CREDS', variable: 'GCP_KEY')]) {
+                withCredentials([file(credentialsId: 'GCP_KEY', variable: 'GCP_KEY')]) {
                     sh """
-                        echo Authenticating with GCP...
-                        gcloud auth activate-service-account --key-file=$GCP_KEY
-                        gcloud config set project $PROJECT_ID
+                        gcloud auth activate-service-account --key-file=${GCP_KEY}
+                        gcloud config set project ${PROJECT_ID}
                     """
                 }
             }
@@ -44,9 +48,19 @@ pipeline {
                         echo "Deploying green version to ${env}..."
                         sh """
                             gcloud container clusters get-credentials ${CLUSTER_NAME} --zone ${CLUSTER_ZONE} --project ${PROJECT_ID}
+
+                            # Create namespace if not exists
                             kubectl apply -f manifests/${env}/namespace.yaml
-                            kubectl apply -f manifests/${env}/frontend-green.yaml
-                            kubectl apply -f manifests/${env}/backend-green.yaml
+
+                            # Delete old green deployments if exist
+                            kubectl delete deployment frontend-green -n ${env} --ignore-not-found
+                            kubectl delete deployment backend-green -n ${env} --ignore-not-found
+
+                            # Apply green deployments
+                            kubectl apply -f manifests/${env}/frontend-deployment.yaml
+                            kubectl apply -f manifests/${env}/backend-deployment.yaml
+
+                            # Update images
                             kubectl set image deployment/frontend-green frontend=${DOCKER_REPO}/gke-3tier-frontend:${IMAGE_TAG} -n ${env}
                             kubectl set image deployment/backend-green backend=${DOCKER_REPO}/gke-3tier-backend:${IMAGE_TAG} -n ${env}
                         """
@@ -68,28 +82,17 @@ pipeline {
                 }
             }
         }
-
-        stage('Cleanup Old Blue') {
-            steps {
-                script {
-                    for (env in ['dev','staging','prod']) {
-                        echo "Cleaning up old blue deployments in ${env}..."
-                        sh """
-                            kubectl delete deployment frontend-blue -n ${env} || true
-                            kubectl delete deployment backend-blue -n ${env} || true
-                        """
-                    }
-                }
-            }
-        }
     }
 
     post {
         success {
-            echo "✅ Deployment successful!"
+            echo "✅ Deployment succeeded!"
         }
         failure {
-            echo "❌ Deployment failed. Check logs."
+            echo "❌ Deployment failed. Check the logs."
+        }
+        always {
+            cleanWs()
         }
     }
 }
