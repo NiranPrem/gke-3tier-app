@@ -7,7 +7,7 @@ pipeline {
         CLUSTER = "my-gke-cluster"
         IMAGE_FRONTEND = "gke-3tier-frontend"
         IMAGE_BACKEND = "gke-3tier-backend"
-        GCP_CREDS = credentials('gcp-credentials') // your Jenkins GCP service account JSON
+        GCP_CREDS = credentials('gke-sa-keys') // your Jenkins GCP service account JSON
     }
 
     stages {
@@ -92,3 +92,4 @@ pipeline {
         }
     }
 }
+
