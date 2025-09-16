@@ -3,23 +3,18 @@ kind: Deployment
 metadata:
   name: frontend-blue
   namespace: dev
-  labels:
-    app: frontend
-    color: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: frontend
-      color: blue
+      app: frontend-blue
   template:
     metadata:
       labels:
-        app: frontend
-        color: blue
+        app: frontend-blue
     spec:
       containers:
-      - name: frontend
-        image: us-central1-docker.pkg.dev/useful-variety-470306-n5/gke-repo/frontend:latest
-        ports:
-        - containerPort: 80
+        - name: frontend
+          image: us-central1-docker.pkg.dev/useful-variety-470306-n5/gke-repo/gke-3tier-frontend:latest
+          ports:
+            - containerPort: 80
