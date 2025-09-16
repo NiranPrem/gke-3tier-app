@@ -1,15 +1,14 @@
 pipeline {
     agent any
     environment {
-        PROJECT_ID     = "useful-variety-470306-n5"
-        CLUSTER_NAME   = "my-gke-cluster"
-        ZONE           = "us-central1-a"
-        GCP_KEY        = credentials('GCP_CREDS')
+        PROJECT_ID    = "useful-variety-470306-n5"
+        CLUSTER_NAME  = "my-gke-cluster"
+        ZONE          = "us-central1-a"
+        GCP_KEY       = credentials('GCP_CREDS')
         IMAGE_FRONTEND = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-frontend:latest"
         IMAGE_BACKEND  = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-backend:latest"
         NAMESPACE_DEV  = "dev"
     }
-
     stages {
 
         stage('Authenticate GCP') {
@@ -19,6 +18,7 @@ pipeline {
                         echo "Authenticating with GCP..."
                         gcloud auth activate-service-account --key-file=$GCP_KEY
                         gcloud config set project $PROJECT_ID
+                        gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
                     """
                 }
             }
@@ -36,21 +36,22 @@ pipeline {
             }
         }
 
-        stage('Deploy to Idle (Green/Blue)') {
+        stage('Deploy to Idle (Blue/Green)') {
             steps {
                 script {
-                    def ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
-                    def ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
+                    // Detect active
+                    ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
+                    ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
-                    def IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
-                    def IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
+                    // Choose idle
+                    IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
+                    IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
-                    echo "Active Frontend: ${ACTIVE_FRONTEND}, deploying new version to: ${IDLE_FRONTEND}"
-                    echo "Active Backend: ${ACTIVE_BACKEND}, deploying new version to: ${IDLE_BACKEND}"
+                    echo "Active Frontend: ${ACTIVE_FRONTEND}, Deploying to: ${IDLE_FRONTEND}"
+                    echo "Active Backend: ${ACTIVE_BACKEND}, Deploying to: ${IDLE_BACKEND}"
 
+                    // Deploy to idle
                     sh """
-                        gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
-
                         kubectl apply -f manifests/dev/${IDLE_FRONTEND}.yaml
                         kubectl set image deployment/${IDLE_FRONTEND} frontend=$IMAGE_FRONTEND -n $NAMESPACE_DEV
 
@@ -61,10 +62,15 @@ pipeline {
             }
         }
 
-        stage('Approval Gate') {
+        stage('Approval Gate: Switch Traffic') {
             steps {
                 script {
-                    input message: "Do you want to switch traffic to the new (green/blue) deployments?", ok: "Switch"
+                    input(
+                      id: 'SwitchApproval',
+                      message: "Do you want to switch traffic to the new deployments?",
+                      ok: "Switch",
+                      submitter: "niranprem"
+                    )
                 }
             }
         }
@@ -72,12 +78,6 @@ pipeline {
         stage('Switch Traffic') {
             steps {
                 script {
-                    def ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
-                    def ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
-
-                    def IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
-                    def IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
-
                     sh """
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
@@ -86,17 +86,29 @@ pipeline {
             }
         }
 
+        stage('Approval Gate: Cleanup Old') {
+            steps {
+                script {
+                    input(
+                      id: 'CleanupApproval',
+                      message: "Do you want to delete the old deployments now?",
+                      ok: "Delete",
+                      submitter: "niranprem"
+                    )
+                }
+            }
+        }
+
         stage('Cleanup Old Deployment') {
             steps {
                 script {
                     sh """
-                        kubectl delete deployment frontend-blue -n $NAMESPACE_DEV --ignore-not-found
-                        kubectl delete deployment frontend-green -n $NAMESPACE_DEV --ignore-not-found
-                        kubectl delete deployment backend-blue -n $NAMESPACE_DEV --ignore-not-found
-                        kubectl delete deployment backend-green -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment $ACTIVE_FRONTEND -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl delete deployment $ACTIVE_BACKEND -n $NAMESPACE_DEV --ignore-not-found
                     """
                 }
             }
         }
-    }
+
+    } // stages
 }
