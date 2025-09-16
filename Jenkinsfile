@@ -1,95 +1,113 @@
 pipeline {
     agent any
 
+    parameters {
+        choice(name: 'NAMESPACE', choices: ['dev','staging','prod'], description: 'Target environment for deployment')
+    }
+
     environment {
         PROJECT_ID = "useful-variety-470306-n5"
         REGION = "us-central1"
         CLUSTER = "my-gke-cluster"
         IMAGE_FRONTEND = "gke-3tier-frontend"
         IMAGE_BACKEND = "gke-3tier-backend"
-        GCP_CREDS = credentials('gke-sa-keys') // your Jenkins GCP service account JSON
+        GCP_CREDS = credentials('gcp-credentials') // This must match your Jenkins credential ID
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
+        FRONT_IMAGE = "${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_FRONTEND}:${IMAGE_TAG}"
+        BACK_IMAGE = "${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_BACKEND}:${IMAGE_TAG}"
     }
 
     stages {
+
         stage('Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/NiranPrem/gke-3tier-app.git'
+                checkout scm
             }
         }
 
-        stage('Build & Push Images') {
+        stage('Authenticate GCP') {
             steps {
                 script {
                     sh """
-                      echo \$GCP_CREDS > /tmp/key.json
-                      gcloud auth activate-service-account --key-file=/tmp/key.json
-                      gcloud config set project \$PROJECT_ID
-
-                      # Build frontend
-                      docker build -t gcr.io/\$PROJECT_ID/\$IMAGE_FRONTEND:\$BUILD_NUMBER ./frontend
-                      docker push gcr.io/\$PROJECT_ID/\$IMAGE_FRONTEND:\$BUILD_NUMBER
-
-                      # Build backend
-                      docker build -t gcr.io/\$PROJECT_ID/\$IMAGE_BACKEND:\$BUILD_NUMBER ./backend
-                      docker push gcr.io/\$PROJECT_ID/\$IMAGE_BACKEND:\$BUILD_NUMBER
+                    echo \$GCP_CREDS > /tmp/key.json
+                    gcloud auth activate-service-account --key-file=/tmp/key.json
+                    gcloud config set project \$PROJECT_ID
                     """
                 }
             }
         }
 
-        stage('Deploy to Dev') {
+        stage('Build & Push Docker Images') {
             steps {
                 script {
                     sh """
-                      gcloud container clusters get-credentials \$CLUSTER --zone \$REGION --project \$PROJECT_ID
+                    gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
-                      kubectl set image deployment/frontend frontend=gcr.io/\$PROJECT_ID/\$IMAGE_FRONTEND:\$BUILD_NUMBER -n dev
-                      kubectl set image deployment/backend backend=gcr.io/\$PROJECT_ID/\$IMAGE_BACKEND:\$BUILD_NUMBER -n dev
+                    # Build and push frontend
+                    docker build -t \$FRONT_IMAGE ./frontend
+                    docker push \$FRONT_IMAGE
+
+                    # Build and push backend
+                    docker build -t \$BACK_IMAGE ./backend
+                    docker push \$BACK_IMAGE
                     """
                 }
             }
         }
 
-        stage('Manual Approval for Staging') {
-            steps {
-                input "Deploy to Staging?"
-            }
-        }
-
-        stage('Deploy to Staging (Blue/Green)') {
+        stage('Deploy Green') {
             steps {
                 script {
                     sh """
-                      gcloud container clusters get-credentials \$CLUSTER --zone \$REGION --project \$PROJECT_ID
+                    gcloud container clusters get-credentials \$CLUSTER --zone us-central1-a --project \$PROJECT_ID
 
-                      kubectl apply -f k8s/staging/ -n staging
-                      kubectl set image deployment/frontend frontend=gcr.io/\$PROJECT_ID/\$IMAGE_FRONTEND:\$BUILD_NUMBER -n staging
-                      kubectl set image deployment/backend backend=gcr.io/\$PROJECT_ID/\$IMAGE_BACKEND:\$BUILD_NUMBER -n staging
+                    # Apply namespace if not exists
+                    kubectl apply -f manifests/${params.NAMESPACE}/namespace.yaml || true
+
+                    # Deploy green versions
+                    kubectl apply -f manifests/${params.NAMESPACE}/frontend-green.yaml
+                    kubectl apply -f manifests/${params.NAMESPACE}/backend-green.yaml
+
+                    # Set images
+                    kubectl set image deployment/frontend-green frontend=\$FRONT_IMAGE -n ${params.NAMESPACE}
+                    kubectl set image deployment/backend-green backend=\$BACK_IMAGE -n ${params.NAMESPACE}
+
+                    # Wait for rollout
+                    kubectl rollout status deployment/frontend-green -n ${params.NAMESPACE}
+                    kubectl rollout status deployment/backend-green -n ${params.NAMESPACE}
                     """
                 }
             }
         }
 
-        stage('Manual Approval for Prod') {
-            steps {
-                input "Deploy to Prod (Blue/Green)?"
-            }
-        }
-
-        stage('Deploy to Prod (Blue/Green)') {
+        stage('Cutover Blue → Green') {
             steps {
                 script {
                     sh """
-                      gcloud container clusters get-credentials \$CLUSTER --zone \$REGION --project \$PROJECT_ID
+                    # Switch services to green deployments
+                    kubectl -n ${params.NAMESPACE} patch svc frontend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+                    kubectl -n ${params.NAMESPACE} patch svc backend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+                    """
+                }
+            }
+        }
 
-                      kubectl apply -f k8s/prod/ -n prod
-                      kubectl set image deployment/frontend frontend=gcr.io/\$PROJECT_ID/\$IMAGE_FRONTEND:\$BUILD_NUMBER -n prod
-                      kubectl set image deployment/backend backend=gcr.io/\$PROJECT_ID/\$IMAGE_BACKEND:\$BUILD_NUMBER -n prod
+        stage('Cleanup Old Blue') {
+            steps {
+                script {
+                    sh """
+                    # Optional: delete blue deployments after cutover
+                    kubectl delete deployment frontend-blue -n ${params.NAMESPACE} || true
+                    kubectl delete deployment backend-blue -n ${params.NAMESPACE} || true
                     """
                 }
             }
         }
     }
-}
 
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
