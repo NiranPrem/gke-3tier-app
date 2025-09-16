@@ -11,8 +11,8 @@ pipeline {
     }
 
     parameters {
-        booleanParam(name: 'SWITCH', defaultValue: false, description: 'Switch traffic to new deployments?')
-        booleanParam(name: 'ROLLBACK', defaultValue: false, description: 'Rollback to previous deployments?')
+        booleanParam(name: 'SWITCH', defaultValue: false, description: 'Do you want to switch traffic to the new deployments? (Yes/No)')
+        booleanParam(name: 'ROLLBACK', defaultValue: false, description: 'Do you want to rollback to the previous deployments? (Yes/No)')
     }
 
     stages {
@@ -44,18 +44,15 @@ pipeline {
         stage('Blue-Green Deploy to Dev') {
             steps {
                 script {
-                    // Get currently active deployments
                     ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
                     ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
-                    // Determine idle deployments
                     IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
                     IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
                     echo "Active Frontend: ${ACTIVE_FRONTEND}, Deploying to: ${IDLE_FRONTEND}"
                     echo "Active Backend: ${ACTIVE_BACKEND}, Deploying to: ${IDLE_BACKEND}"
 
-                    // Deploy to idle
                     sh """
                         gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
 
@@ -79,7 +76,7 @@ pipeline {
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
                     """
-                    echo "Traffic switched to new deployments. Previous deployments remain intact for rollback."
+                    echo "✅ Traffic switched to new deployments."
                 }
             }
         }
@@ -92,10 +89,9 @@ pipeline {
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_BACKEND}"}}}'
                     """
-                    echo "Traffic rolled back to previous deployments."
+                    echo "🔄 Traffic rolled back to previous deployments."
                 }
             }
         }
-
-    } // stages
+    }
 }
