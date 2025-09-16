@@ -60,22 +60,37 @@ pipeline {
                         kubectl set image deployment/${IDLE_BACKEND} backend=$IMAGE_BACKEND -n $NAMESPACE_DEV
                     """
 
-                    // Switch services to new deployments
-                    sh """
-                        kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
-                        kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
-                    """
+                    echo "Idle deployments are ready for testing."
                 }
             }
         }
 
-        stage('Cleanup Old Deployment') {
+        stage('Approval to Switch Traffic') {
             steps {
                 script {
+                    input message: "Approve switching traffic to new deployments?", ok: "Switch"
+                    
                     sh """
-                        kubectl delete deployment $ACTIVE_FRONTEND -n $NAMESPACE_DEV --ignore-not-found
-                        kubectl delete deployment $ACTIVE_BACKEND -n $NAMESPACE_DEV --ignore-not-found
+                        kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
+                        kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
                     """
+
+                    echo "Traffic switched to new deployments. Previous deployments remain intact for rollback."
+                }
+            }
+        }
+
+        stage('Rollback (Optional)') {
+            steps {
+                script {
+                    input message: "Rollback to previous deployments?", ok: "Rollback"
+                    
+                    sh """
+                        kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_FRONTEND}"}}}'
+                        kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_BACKEND}"}}}'
+                    """
+
+                    echo "Traffic rolled back to previous deployments."
                 }
             }
         }
