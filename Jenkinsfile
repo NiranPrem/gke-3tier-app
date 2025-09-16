@@ -9,6 +9,12 @@ pipeline {
         IMAGE_BACKEND  = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-backend:latest"
         NAMESPACE_DEV = "dev"
     }
+
+    parameters {
+        booleanParam(name: 'SWITCH', defaultValue: false, description: 'Switch traffic to new deployments?')
+        booleanParam(name: 'ROLLBACK', defaultValue: false, description: 'Rollback to previous deployments?')
+    }
+
     stages {
 
         stage('Authenticate GCP') {
@@ -65,31 +71,27 @@ pipeline {
             }
         }
 
-        stage('Approval to Switch Traffic') {
+        stage('Switch Traffic') {
+            when { expression { params.SWITCH } }
             steps {
                 script {
-                    input message: "Approve switching traffic to new deployments?", ok: "Switch"
-                    
                     sh """
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${IDLE_BACKEND}"}}}'
                     """
-
                     echo "Traffic switched to new deployments. Previous deployments remain intact for rollback."
                 }
             }
         }
 
-        stage('Rollback (Optional)') {
+        stage('Rollback') {
+            when { expression { params.ROLLBACK } }
             steps {
                 script {
-                    input message: "Rollback to previous deployments?", ok: "Rollback"
-                    
                     sh """
                         kubectl patch svc frontend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_FRONTEND}"}}}'
                         kubectl patch svc backend-svc -n $NAMESPACE_DEV -p '{"spec":{"selector":{"app":"${ACTIVE_BACKEND}"}}}'
                     """
-
                     echo "Traffic rolled back to previous deployments."
                 }
             }
