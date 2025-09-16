@@ -52,17 +52,21 @@ pipeline {
                             # Create namespace if not exists
                             kubectl apply -f manifests/${env}/namespace.yaml
 
-                            # Delete old green deployments if exist
+                            # Delete previous green deployments (ignore not found)
                             kubectl delete deployment frontend-green -n ${env} --ignore-not-found
                             kubectl delete deployment backend-green -n ${env} --ignore-not-found
 
                             # Apply green deployments
-                            kubectl apply -f manifests/${env}/frontend-deployment.yaml
-                            kubectl apply -f manifests/${env}/backend-deployment.yaml
+                            kubectl apply -f manifests/${env}/frontend-green.yaml
+                            kubectl apply -f manifests/${env}/backend-green.yaml
 
-                            # Update images
+                            # Update images in deployments
                             kubectl set image deployment/frontend-green frontend=${DOCKER_REPO}/gke-3tier-frontend:${IMAGE_TAG} -n ${env}
                             kubectl set image deployment/backend-green backend=${DOCKER_REPO}/gke-3tier-backend:${IMAGE_TAG} -n ${env}
+
+                            # Apply services if not already applied
+                            kubectl apply -f manifests/${env}/svc-frontend.yaml
+                            kubectl apply -f manifests/${env}/svc-backend.yaml
                         """
                     }
                 }
@@ -89,7 +93,7 @@ pipeline {
             echo "✅ Deployment succeeded!"
         }
         failure {
-            echo "❌ Deployment failed. Check the logs."
+            echo "❌ Deployment failed. Check logs."
         }
         always {
             cleanWs()
