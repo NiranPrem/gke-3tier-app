@@ -1,0 +1,63 @@
+pipeline {
+  agent any
+  parameters {
+    choice(name: 'NAMESPACE', choices: ['dev','staging','prod'], description: 'Target environment')
+  }
+  environment {
+    PROJECT = "useful-variety-470306-n5"
+    REGION = "us-central1"
+    REPO = "gke-repo"
+    CLUSTER = "my-gke-cluster"
+    ZONE = "us-central1-a"
+    IMAGE_TAG = "${env.BUILD_NUMBER}"
+    FRONT_IMAGE = "${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/frontend:${IMAGE_TAG}"
+    BACK_IMAGE  = "${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/backend:${IMAGE_TAG}"
+  }
+
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+
+    stage('Build & Push Images') {
+      steps {
+        sh "gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet"
+
+        dir('frontend') {
+          sh "docker build -t ${FRONT_IMAGE} ."
+          sh "docker push ${FRONT_IMAGE}"
+        }
+
+        dir('backend') {
+          sh "docker build -t ${BACK_IMAGE} ."
+          sh "docker push ${BACK_IMAGE}"
+        }
+      }
+    }
+
+    stage('Deploy Green') {
+      steps {
+        sh """
+        gcloud container clusters get-credentials $CLUSTER --zone $ZONE --project $PROJECT
+
+        kubectl apply -f manifests/${params.NAMESPACE}/namespace.yaml || true
+        kubectl apply -f manifests/${params.NAMESPACE}/frontend-green.yaml
+        kubectl apply -f manifests/${params.NAMESPACE}/backend-green.yaml
+
+        kubectl set image deployment/frontend-green frontend=${FRONT_IMAGE} -n ${params.NAMESPACE}
+        kubectl set image deployment/backend-green backend=${BACK_IMAGE} -n ${params.NAMESPACE}
+
+        kubectl rollout status deployment/frontend-green -n ${params.NAMESPACE}
+        kubectl rollout status deployment/backend-green -n ${params.NAMESPACE}
+        """
+      }
+    }
+
+    stage('Cutover') {
+      steps {
+        sh """
+        kubectl -n ${params.NAMESPACE} patch svc frontend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+        kubectl -n ${params.NAMESPACE} patch svc backend-svc  --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+        """
+      }
+    }
+  }
+}
