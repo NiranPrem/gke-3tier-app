@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-green
+  namespace: prod
+  labels:
+    app: frontend
+    color: green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+      color: green
+  template:
+    metadata:
+      labels:
+        app: frontend
+        color: green
+    spec:
+      containers:
+      - name: frontend
+        image: us-central1-docker.pkg.dev/useful-variety-470306-n5/gke-repo/frontend:latest
+        ports:
+        - containerPort: 80
