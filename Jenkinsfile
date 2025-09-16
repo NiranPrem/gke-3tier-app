@@ -1,20 +1,22 @@
 pipeline {
     agent any
 
-    parameters {
-        choice(name: 'NAMESPACE', choices: ['dev','staging','prod'], description: 'Select environment to deploy')
+    environment {
+        PROJECT_ID = 'useful-variety-470306-n5'
+        ZONE = 'us-central1-a'
+        CLUSTER_NAME = 'my-gke-cluster'
+        REPO = 'us-central1-docker.pkg.dev/useful-variety-470306-n5/gke-repo'
+
+        // Docker image tags using BUILD_NUMBER
+        FRONT_IMAGE = "${REPO}/gke-3tier-frontend:${BUILD_NUMBER}"
+        BACK_IMAGE  = "${REPO}/gke-3tier-backend:${BUILD_NUMBER}"
     }
 
-    environment {
-        PROJECT_ID = "useful-variety-470306-n5"
-        REGION = "us-central1"
-        CLUSTER = "my-gke-cluster"
-        IMAGE_FRONTEND = "gke-3tier-frontend"
-        IMAGE_BACKEND = "gke-3tier-backend"
+    parameters {
+        choice(name: 'ENV', choices: ['dev','staging','prod'], description: 'Select environment')
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -23,7 +25,7 @@ pipeline {
 
         stage('Authenticate GCP') {
             steps {
-                withCredentials([file(credentialsId: 'gcp-credentials', variable: 'GCP_CREDS')]) {
+                withCredentials([file(credentialsId: 'GCP_CREDS', variable: 'GCP_CREDS')]) {
                     sh '''
                         echo "Authenticating with GCP..."
                         gcloud auth activate-service-account --key-file=$GCP_CREDS
@@ -35,53 +37,38 @@ pipeline {
 
         stage('Build & Push Docker Images') {
             steps {
-                script {
-                    sh '''
-                        echo "Building and pushing Docker images..."
+                sh '''
+                    echo "Building frontend image $FRONT_IMAGE"
+                    docker build -t $FRONT_IMAGE ./frontend
+                    docker push $FRONT_IMAGE
 
-                        gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
-
-                        FRONT_IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_FRONTEND}:${BUILD_NUMBER}
-                        BACK_IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_BACKEND}:${BUILD_NUMBER}
-
-                        echo "Frontend image: $FRONT_IMAGE"
-                        echo "Backend image: $BACK_IMAGE"
-
-                        # Build and push frontend
-                        docker build -t $FRONT_IMAGE ./frontend
-                        docker push $FRONT_IMAGE
-
-                        # Build and push backend
-                        docker build -t $BACK_IMAGE ./backend
-                        docker push $BACK_IMAGE
-                    '''
-                }
+                    echo "Building backend image $BACK_IMAGE"
+                    docker build -t $BACK_IMAGE ./backend
+                    docker push $BACK_IMAGE
+                '''
             }
         }
 
         stage('Deploy Green') {
             steps {
                 script {
-                    sh '''
-                        echo "Deploying green versions..."
+                    def envDir = "manifests/${params.ENV}"
 
-                        gcloud container clusters get-credentials $CLUSTER --zone us-central1-a --project $PROJECT_ID
+                    sh """
+                        echo "Deploying green version to ${params.ENV}..."
+                        gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
 
-                        # Create namespace if not exists
-                        kubectl apply -f manifests/${NAMESPACE}/namespace.yaml || true
+                        # Apply namespace
+                        kubectl apply -f ${envDir}/namespace.yaml
 
-                        # Deploy green versions
-                        kubectl apply -f manifests/${NAMESPACE}/frontend-green.yaml
-                        kubectl apply -f manifests/${NAMESPACE}/backend-green.yaml
+                        # Apply green deployments
+                        kubectl apply -f ${envDir}/frontend-green.yaml
+                        kubectl apply -f ${envDir}/backend-green.yaml
 
-                        # Set images for green deployments
-                        kubectl set image deployment/frontend-green frontend=$FRONT_IMAGE -n ${NAMESPACE}
-                        kubectl set image deployment/backend-green backend=$BACK_IMAGE -n ${NAMESPACE}
-
-                        # Wait for rollout
-                        kubectl rollout status deployment/frontend-green -n ${NAMESPACE}
-                        kubectl rollout status deployment/backend-green -n ${NAMESPACE}
-                    '''
+                        # Update deployments with new images
+                        kubectl set image deployment/frontend-green frontend=$FRONT_IMAGE -n ${params.ENV}
+                        kubectl set image deployment/backend-green backend=$BACK_IMAGE -n ${params.ENV}
+                    """
                 }
             }
         }
@@ -89,11 +76,14 @@ pipeline {
         stage('Cutover Blue → Green') {
             steps {
                 script {
-                    sh '''
-                        echo "Switching services from blue to green..."
-                        kubectl -n ${NAMESPACE} patch svc frontend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
-                        kubectl -n ${NAMESPACE} patch svc backend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
-                    '''
+                    sh """
+                        echo "Switching traffic from blue to green in ${params.ENV}..."
+                        envDir="manifests/${params.ENV}"
+
+                        # Update service selectors to green pods
+                        kubectl apply -f ${envDir}/frontend-svc-green.yaml
+                        kubectl apply -f ${envDir}/backend-svc-green.yaml
+                    """
                 }
             }
         }
@@ -101,17 +91,25 @@ pipeline {
         stage('Cleanup Old Blue') {
             steps {
                 script {
-                    sh '''
-                        echo "Cleaning up old blue deployments..."
-                        kubectl delete deployment frontend-blue -n ${NAMESPACE} || true
-                        kubectl delete deployment backend-blue -n ${NAMESPACE} || true
-                    '''
+                    sh """
+                        echo "Cleaning up old blue deployments in ${params.ENV}..."
+                        envDir="manifests/${params.ENV}"
+
+                        kubectl delete -f ${envDir}/frontend-blue.yaml --ignore-not-found
+                        kubectl delete -f ${envDir}/backend-blue.yaml --ignore-not-found
+                    """
                 }
             }
         }
     }
 
     post {
+        success {
+            echo "Deployment to ${params.ENV} succeeded!"
+        }
+        failure {
+            echo "Deployment to ${params.ENV} failed!"
+        }
         always {
             cleanWs()
         }
