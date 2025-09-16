@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'NAMESPACE', choices: ['dev','staging','prod'], description: 'Target environment for deployment')
+        choice(name: 'NAMESPACE', choices: ['dev','staging','prod'], description: 'Select environment to deploy')
     }
 
     environment {
@@ -11,10 +11,7 @@ pipeline {
         CLUSTER = "my-gke-cluster"
         IMAGE_FRONTEND = "gke-3tier-frontend"
         IMAGE_BACKEND = "gke-3tier-backend"
-        GCP_CREDS = credentials('gcp-credentials') // This must match your Jenkins credential ID
         IMAGE_TAG = "${env.BUILD_NUMBER}"
-        FRONT_IMAGE = "${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_FRONTEND}:${IMAGE_TAG}"
-        BACK_IMAGE = "${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_BACKEND}:${IMAGE_TAG}"
     }
 
     stages {
@@ -27,11 +24,12 @@ pipeline {
 
         stage('Authenticate GCP') {
             steps {
-                script {
+                // This assumes you uploaded Secret File in Jenkins with ID 'gcp-credentials'
+                withCredentials([file(credentialsId: 'gcp-credentials', variable: 'GCP_CREDS')]) {
                     sh """
-                    echo \$GCP_CREDS > /tmp/key.json
-                    gcloud auth activate-service-account --key-file=/tmp/key.json
-                    gcloud config set project \$PROJECT_ID
+                        echo "Authenticating with GCP..."
+                        gcloud auth activate-service-account --key-file=$GCP_CREDS
+                        gcloud config set project $PROJECT_ID
                     """
                 }
             }
@@ -41,15 +39,18 @@ pipeline {
             steps {
                 script {
                     sh """
-                    gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+                        gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
-                    # Build and push frontend
-                    docker build -t \$FRONT_IMAGE ./frontend
-                    docker push \$FRONT_IMAGE
+                        FRONT_IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_FRONTEND}:${IMAGE_TAG}
+                        BACK_IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_BACKEND}:${IMAGE_TAG}
 
-                    # Build and push backend
-                    docker build -t \$BACK_IMAGE ./backend
-                    docker push \$BACK_IMAGE
+                        # Build frontend
+                        docker build -t $FRONT_IMAGE ./frontend
+                        docker push $FRONT_IMAGE
+
+                        # Build backend
+                        docker build -t $BACK_IMAGE ./backend
+                        docker push $BACK_IMAGE
                     """
                 }
             }
@@ -59,22 +60,22 @@ pipeline {
             steps {
                 script {
                     sh """
-                    gcloud container clusters get-credentials \$CLUSTER --zone us-central1-a --project \$PROJECT_ID
+                        gcloud container clusters get-credentials $CLUSTER --zone us-central1-a --project $PROJECT_ID
 
-                    # Apply namespace if not exists
-                    kubectl apply -f manifests/${params.NAMESPACE}/namespace.yaml || true
+                        # Create namespace if not exists
+                        kubectl apply -f manifests/${params.NAMESPACE}/namespace.yaml || true
 
-                    # Deploy green versions
-                    kubectl apply -f manifests/${params.NAMESPACE}/frontend-green.yaml
-                    kubectl apply -f manifests/${params.NAMESPACE}/backend-green.yaml
+                        # Deploy green versions
+                        kubectl apply -f manifests/${params.NAMESPACE}/frontend-green.yaml
+                        kubectl apply -f manifests/${params.NAMESPACE}/backend-green.yaml
 
-                    # Set images
-                    kubectl set image deployment/frontend-green frontend=\$FRONT_IMAGE -n ${params.NAMESPACE}
-                    kubectl set image deployment/backend-green backend=\$BACK_IMAGE -n ${params.NAMESPACE}
+                        # Set images for green deployments
+                        kubectl set image deployment/frontend-green frontend=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_FRONTEND}:${IMAGE_TAG} -n ${params.NAMESPACE}
+                        kubectl set image deployment/backend-green backend=${REGION}-docker.pkg.dev/${PROJECT_ID}/gke-repo/${IMAGE_BACKEND}:${IMAGE_TAG} -n ${params.NAMESPACE}
 
-                    # Wait for rollout
-                    kubectl rollout status deployment/frontend-green -n ${params.NAMESPACE}
-                    kubectl rollout status deployment/backend-green -n ${params.NAMESPACE}
+                        # Wait for rollout
+                        kubectl rollout status deployment/frontend-green -n ${params.NAMESPACE}
+                        kubectl rollout status deployment/backend-green -n ${params.NAMESPACE}
                     """
                 }
             }
@@ -84,9 +85,9 @@ pipeline {
             steps {
                 script {
                     sh """
-                    # Switch services to green deployments
-                    kubectl -n ${params.NAMESPACE} patch svc frontend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
-                    kubectl -n ${params.NAMESPACE} patch svc backend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+                        # Switch services to green deployments
+                        kubectl -n ${params.NAMESPACE} patch svc frontend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
+                        kubectl -n ${params.NAMESPACE} patch svc backend-svc --type='json' -p='[{"op":"replace","path":"/spec/selector/color","value":"green"}]'
                     """
                 }
             }
@@ -96,9 +97,9 @@ pipeline {
             steps {
                 script {
                     sh """
-                    # Optional: delete blue deployments after cutover
-                    kubectl delete deployment frontend-blue -n ${params.NAMESPACE} || true
-                    kubectl delete deployment backend-blue -n ${params.NAMESPACE} || true
+                        # Optional: delete old blue deployments
+                        kubectl delete deployment frontend-blue -n ${params.NAMESPACE} || true
+                        kubectl delete deployment backend-blue -n ${params.NAMESPACE} || true
                     """
                 }
             }
