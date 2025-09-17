@@ -4,9 +4,7 @@ metadata:
   name: app-ingress
   namespace: dev
   annotations:
-    kubernetes.io/ingress.class: "nginx"
-    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
-    nginx.ingress.kubernetes.io/whitelist-source-range: "203.0.113.10/32"  # your IP
+    kubernetes.io/ingress.class: "gce"
 spec:
   rules:
   - http:
