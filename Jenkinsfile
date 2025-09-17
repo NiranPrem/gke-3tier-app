@@ -36,14 +36,23 @@ pipeline {
             }
         }
 
+        stage('Apply Ingress') {
+            steps {
+                echo "Applying updated Ingress manifest..."
+                sh """
+                    kubectl apply -f manifests/dev/ingress.yaml
+                """
+            }
+        }
+
         stage('Deploy to Idle (Blue/Green)') {
             steps {
                 script {
-                    // Detect active
+                    // Detect active deployments
                     ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
                     ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
-                    // Choose idle
+                    // Choose idle deployments
                     IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
                     IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
