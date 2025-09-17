@@ -125,3 +125,19 @@ Frontend is public (via LoadBalancer).
 Backend is private (via ClusterIP).
 
 Blue/Green switching is controlled by which Deployment your Service points to.
+
+
+User Browser (Internet)
+       │
+       ▼
+[ Google Cloud External Load Balancer ]
+       │  (public IP: 35.193.184.157)
+       ▼
+VPC Firewall → GKE Node (VM in VPC subnet)
+       │
+       ▼
+frontend-svc (Service) → frontend Pod (VPC IP)
+       │
+       ▼
+backend-svc (ClusterIP, VPC-only) → backend Pod (VPC IP)
+
