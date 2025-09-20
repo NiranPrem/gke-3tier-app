@@ -25,8 +25,19 @@ pipeline {
             steps {
                 script {
                     def scannerHome = tool "${SONAR_SCANNER}"
-                    withSonarQubeEnv('MySonarQubeServer') { // Use the name of your SonarQube server in Jenkins
-                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${SONAR_PROJECT_KEY}"
+                    withSonarQubeEnv('MySonarQubeServer') {
+                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.sources=."
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                script {
+                    // Wait up to 5 minutes for SonarQube to compute quality gate
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
                     }
                 }
             }
@@ -59,7 +70,6 @@ pipeline {
 
         stage('Apply Ingress') {
             steps {
-                echo "Applying updated Ingress manifest..."
                 sh "kubectl apply -f manifests/dev/ingress.yaml"
             }
         }
