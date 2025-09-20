@@ -1,15 +1,36 @@
 pipeline {
     agent any
     environment {
-        PROJECT_ID    = "useful-variety-470306-n5"
-        CLUSTER_NAME  = "my-gke-cluster"
-        ZONE          = "us-central1-a"
-        GCP_KEY       = credentials('GCP_CREDS')
+        PROJECT_ID     = "useful-variety-470306-n5"
+        CLUSTER_NAME   = "my-gke-cluster"
+        ZONE           = "us-central1-a"
+        GCP_KEY        = credentials('GCP_CREDS')
         IMAGE_FRONTEND = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-frontend:latest"
         IMAGE_BACKEND  = "us-central1-docker.pkg.dev/${PROJECT_ID}/gke-repo/gke-3tier-backend:latest"
         NAMESPACE_DEV  = "dev"
+
+        // SonarQube settings
+        SONAR_PROJECT_KEY = "mysonar"        // Your SonarQube project key
+        SONAR_SCANNER     = "SonarScanner"   // Tool name as configured in Jenkins
     }
     stages {
+
+        stage('SCM Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool "${SONAR_SCANNER}"
+                    withSonarQubeEnv('MySonarQubeServer') { // Use the name of your SonarQube server in Jenkins
+                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${SONAR_PROJECT_KEY}"
+                    }
+                }
+            }
+        }
 
         stage('Authenticate GCP') {
             steps {
@@ -39,27 +60,22 @@ pipeline {
         stage('Apply Ingress') {
             steps {
                 echo "Applying updated Ingress manifest..."
-                sh """
-                    kubectl apply -f manifests/dev/ingress.yaml
-                """
+                sh "kubectl apply -f manifests/dev/ingress.yaml"
             }
         }
 
         stage('Deploy to Idle (Blue/Green)') {
             steps {
                 script {
-                    // Detect active deployments
                     ACTIVE_FRONTEND = sh(script: "kubectl get svc frontend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
                     ACTIVE_BACKEND  = sh(script: "kubectl get svc backend-svc -n $NAMESPACE_DEV -o jsonpath='{.spec.selector.app}'", returnStdout: true).trim()
 
-                    // Choose idle deployments
                     IDLE_FRONTEND = (ACTIVE_FRONTEND == "frontend-blue") ? "frontend-green" : "frontend-blue"
                     IDLE_BACKEND  = (ACTIVE_BACKEND == "backend-blue") ? "backend-green" : "backend-blue"
 
                     echo "Active Frontend: ${ACTIVE_FRONTEND}, Deploying to: ${IDLE_FRONTEND}"
                     echo "Active Backend: ${ACTIVE_BACKEND}, Deploying to: ${IDLE_BACKEND}"
 
-                    // Deploy to idle
                     sh """
                         kubectl apply -f manifests/dev/${IDLE_FRONTEND}.yaml
                         kubectl set image deployment/${IDLE_FRONTEND} frontend=$IMAGE_FRONTEND -n $NAMESPACE_DEV
@@ -73,14 +89,12 @@ pipeline {
 
         stage('Approval Gate: Switch Traffic') {
             steps {
-                script {
-                    input(
-                      id: 'SwitchApproval',
-                      message: "Do you want to switch traffic to the new deployments?",
-                      ok: "Switch",
-                      submitter: "niranprem"
-                    )
-                }
+                input(
+                  id: 'SwitchApproval',
+                  message: "Do you want to switch traffic to the new deployments?",
+                  ok: "Switch",
+                  submitter: "niranprem"
+                )
             }
         }
 
@@ -97,14 +111,12 @@ pipeline {
 
         stage('Approval Gate: Cleanup Old') {
             steps {
-                script {
-                    input(
-                      id: 'CleanupApproval',
-                      message: "Do you want to delete the old deployments now?",
-                      ok: "Delete",
-                      submitter: "niranprem"
-                    )
-                }
+                input(
+                  id: 'CleanupApproval',
+                  message: "Do you want to delete the old deployments now?",
+                  ok: "Delete",
+                  submitter: "niranprem"
+                )
             }
         }
 
