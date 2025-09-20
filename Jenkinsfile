@@ -10,8 +10,9 @@ pipeline {
         NAMESPACE_DEV  = "dev"
 
         // SonarQube settings
-        SONAR_PROJECT_KEY = "mysonar"        // Your SonarQube project key
-        SONAR_SCANNER     = "SonarScanner"   // Tool name as configured in Jenkins
+        SONAR_PROJECT_KEY = "mysonar"
+        SONAR_SCANNER     = "SonarScanner"   // Name of the tool installed in Jenkins
+        SONAR_TOKEN       = credentials('newsonar') // Use your token credential here
     }
     stages {
 
@@ -25,20 +26,23 @@ pipeline {
             steps {
                 script {
                     def scannerHome = tool "${SONAR_SCANNER}"
-                    withSonarQubeEnv('MySonarQubeServer') {
-                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.sources=."
+                    withSonarQubeEnv('MySonarQubeServer') { // Name of SonarQube server configured in Jenkins
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=http://35.226.247.128:9000 \
+                            -Dsonar.login=${SONAR_TOKEN}
+                        """
                     }
                 }
             }
         }
 
-        stage('Quality Gate') {
+        stage('Wait for Quality Gate') {
             steps {
-                script {
-                    // Wait up to 5 minutes for SonarQube to compute quality gate
-                    timeout(time: 5, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: true
-                    }
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }
@@ -70,6 +74,7 @@ pipeline {
 
         stage('Apply Ingress') {
             steps {
+                echo "Applying updated Ingress manifest..."
                 sh "kubectl apply -f manifests/dev/ingress.yaml"
             }
         }
